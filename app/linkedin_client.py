@@ -3,6 +3,7 @@ import re
 import logging
 from typing import Optional
 import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +70,98 @@ class LinkedInClient:
         try:
             resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
         except requests.TooManyRedirects:
-            raise LinkedInAuthError(
-                "Too many redirects — your LI_AT cookie is likely expired. "
-                "Copy a fresh one from your browser."
-            )
+            # Cookie expired — try auto-login if credentials are available
+            fresh = self._auto_login()
+            if fresh:
+                logger.info("Auto-login succeeded; refreshing session cookie.")
+                self.li_at = fresh
+                os.environ["LI_AT"] = fresh
+                session.cookies.set("li_at", fresh, domain=".linkedin.com")
+                resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
+            else:
+                raise LinkedInAuthError(
+                    "LI_AT cookie expired. Set LINKEDIN_EMAIL + LINKEDIN_PASSWORD "
+                    "env vars for auto-login, or copy a fresh cookie from your browser."
+                )
+
+        # Check if we landed on the login/authwall page
+        if "authwall" in resp.url or "login" in resp.url:
+            fresh = self._auto_login()
+            if fresh:
+                logger.info("Session was on login page; auto-login refreshed cookie.")
+                self.li_at = fresh
+                os.environ["LI_AT"] = fresh
+                session.cookies.set("li_at", fresh, domain=".linkedin.com")
+                resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
+            else:
+                raise LinkedInAuthError(
+                    "Redirected to login page. Provide LINKEDIN_EMAIL + LINKEDIN_PASSWORD "
+                    "for auto-login, or refresh LI_AT manually."
+                )
+
         for c in list(resp.cookies) + list(session.cookies):
             if c.name == "JSESSIONID":
                 return c.value.strip('"')
         raise LinkedInAuthError(
             "Could not obtain CSRF token. Ensure LI_AT is valid and not expired."
         )
+
+    def _auto_login(self) -> Optional[str]:
+        """
+        Use Playwright to log in with LINKEDIN_EMAIL + LINKEDIN_PASSWORD
+        and return a fresh li_at cookie value. Returns None if credentials
+        are not configured or login fails.
+        """
+        email = os.environ.get("LINKEDIN_EMAIL", "")
+        password = os.environ.get("LINKEDIN_PASSWORD", "")
+        if not email or not password:
+            return None
+
+        logger.info("Attempting auto-login with stored credentials...")
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+                ctx = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="en-US",
+                )
+                page = ctx.new_page()
+                page.goto("https://www.linkedin.com/login", timeout=20000)
+                page.fill("#username", email)
+                page.fill("#password", password)
+                page.click('[type="submit"]')
+
+                # Wait for redirect away from login page
+                try:
+                    page.wait_for_url(
+                        lambda url: "login" not in url and "checkpoint" not in url,
+                        timeout=15000,
+                    )
+                except PlaywrightTimeout:
+                    logger.warning("Auto-login: still on login/checkpoint page after 15s")
+                    browser.close()
+                    return None
+
+                cookies = ctx.cookies()
+                browser.close()
+
+            li_at = next((c["value"] for c in cookies if c["name"] == "li_at"), None)
+            if li_at:
+                logger.info("Auto-login succeeded.")
+            else:
+                logger.warning("Auto-login: li_at cookie not found after login.")
+            return li_at
+
+        except Exception as e:
+            logger.error("Auto-login failed: %s", e)
+            return None
 
     # ── HTTP ──────────────────────────────────────────────────────────────────
 
