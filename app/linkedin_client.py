@@ -67,7 +67,14 @@ class LinkedInClient:
         return s
 
     def _fetch_csrf(self, session) -> str:
-        resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
+        try:
+            resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
+        except Exception as e:
+            if "redirect" in str(e).lower():
+                raise LinkedInAuthError(
+                    "LI_AT cookie expired. Copy a fresh cookie from your browser."
+                )
+            raise
 
         if "authwall" in resp.url or "login" in resp.url:
             fresh = self._auto_login()
