@@ -3,7 +3,6 @@ import re
 import logging
 from typing import Optional
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -108,56 +107,63 @@ class LinkedInClient:
 
     def _auto_login(self) -> Optional[str]:
         """
-        Use Playwright to log in with LINKEDIN_EMAIL + LINKEDIN_PASSWORD
-        and return a fresh li_at cookie value. Returns None if credentials
-        are not configured or login fails.
+        Re-authenticate using pure HTTP requests (no browser).
+        Reverse-engineers LinkedIn's login form POST to obtain a fresh li_at cookie.
+        Requires LINKEDIN_EMAIL and LINKEDIN_PASSWORD env vars.
         """
         email = os.environ.get("LINKEDIN_EMAIL", "")
         password = os.environ.get("LINKEDIN_PASSWORD", "")
         if not email or not password:
             return None
 
-        logger.info("Attempting auto-login with stored credentials...")
+        logger.info("Attempting auto-login via HTTP (no browser)...")
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage"],
-                )
-                ctx = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                    locale="en-US",
-                )
-                page = ctx.new_page()
-                page.goto("https://www.linkedin.com/login", timeout=20000)
-                page.fill("#username", email)
-                page.fill("#password", password)
-                page.click('[type="submit"]')
+            s = requests.Session()
+            s.headers.update({
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            })
 
-                # Wait for redirect away from login page
-                try:
-                    page.wait_for_url(
-                        lambda url: "login" not in url and "checkpoint" not in url,
-                        timeout=15000,
-                    )
-                except PlaywrightTimeout:
-                    logger.warning("Auto-login: still on login/checkpoint page after 15s")
-                    browser.close()
-                    return None
+            # Step 1: GET login page to extract the CSRF token
+            login_page = s.get("https://www.linkedin.com/login", timeout=15)
+            csrf_match = re.search(
+                r'name="loginCsrfParam"\s+value="([^"]+)"', login_page.text
+            )
+            if not csrf_match:
+                logger.warning("Auto-login: could not find loginCsrfParam on login page.")
+                return None
+            csrf = csrf_match.group(1)
 
-                cookies = ctx.cookies()
-                browser.close()
+            # Step 2: POST credentials to LinkedIn's login endpoint
+            resp = s.post(
+                "https://www.linkedin.com/checkpoint/lg/login-submit",
+                data={
+                    "session_key": email,
+                    "session_password": password,
+                    "loginCsrfParam": csrf,
+                    "isJsEnabled": "false",
+                    "trk": "guest_homepage-basic_sign-in-submit",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                allow_redirects=True,
+                timeout=15,
+            )
 
-            li_at = next((c["value"] for c in cookies if c["name"] == "li_at"), None)
-            if li_at:
-                logger.info("Auto-login succeeded.")
-            else:
-                logger.warning("Auto-login: li_at cookie not found after login.")
-            return li_at
+            # Extract li_at from the session cookies
+            for c in s.cookies:
+                if c.name == "li_at":
+                    logger.info("Auto-login via HTTP succeeded.")
+                    return c.value
+
+            logger.warning(
+                "Auto-login: li_at not found after POST. "
+                "LinkedIn may require 2FA or CAPTCHA. Final URL: %s", resp.url
+            )
+            return None
 
         except Exception as e:
             logger.error("Auto-login failed: %s", e)
