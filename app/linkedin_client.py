@@ -49,19 +49,31 @@ class LinkedInClient:
         s = requests.Session()
         s.max_redirects = 5
         s.cookies.set("li_at", self.li_at, domain=".linkedin.com")
+
+        # Use browser-like headers for the CSRF fetch so LinkedIn doesn't flag it
+        browser_ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
         s.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": browser_ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        })
+
+        csrf = self._fetch_csrf(s)
+
+        # Switch to API headers for Voyager calls
+        s.headers.update({
+            "Accept": "application/vnd.linkedin.normalized+json+2.1",
             "X-Li-Lang": "en_US",
             "X-RestLi-Protocol-Version": "2.0.0",
-            "Accept": "application/vnd.linkedin.normalized+json+2.1",
+            "csrf-token": csrf,
         })
-        csrf = self._fetch_csrf(s)
-        s.headers["csrf-token"] = csrf
         s.cookies.set("JSESSIONID", f'"{csrf}"', domain=".linkedin.com")
         return s
 
@@ -69,7 +81,6 @@ class LinkedInClient:
         try:
             resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
         except requests.TooManyRedirects:
-            # Cookie expired — try auto-login if credentials are available
             fresh = self._auto_login()
             if fresh:
                 logger.info("Auto-login succeeded; refreshing session cookie.")
@@ -79,11 +90,9 @@ class LinkedInClient:
                 resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
             else:
                 raise LinkedInAuthError(
-                    "LI_AT cookie expired. Set LINKEDIN_EMAIL + LINKEDIN_PASSWORD "
-                    "env vars for auto-login, or copy a fresh cookie from your browser."
+                    "LI_AT cookie expired. Copy a fresh cookie from your browser."
                 )
 
-        # Check if we landed on the login/authwall page
         if "authwall" in resp.url or "login" in resp.url:
             fresh = self._auto_login()
             if fresh:
@@ -94,8 +103,7 @@ class LinkedInClient:
                 resp = session.get(f"{self.BASE_URL}/feed/", timeout=15)
             else:
                 raise LinkedInAuthError(
-                    "Redirected to login page. Provide LINKEDIN_EMAIL + LINKEDIN_PASSWORD "
-                    "for auto-login, or refresh LI_AT manually."
+                    "Redirected to login page. Copy a fresh LI_AT cookie from your browser."
                 )
 
         for c in list(resp.cookies) + list(session.cookies):
