@@ -133,11 +133,9 @@ class LinkedInClient:
             })
 
             # Step 1: GET login page to extract the CSRF token
-            login_page = s.get(
-                "https://www.linkedin.com/login",
-                params={"fromSignIn": "true", "trk": "guest_homepage-basic_nav-header-signin"},
-                timeout=15,
-            )
+            # No query params — extra params can cause LinkedIn to serve a variant
+            # that doesn't include the data-csrf attribute.
+            login_page = s.get("https://www.linkedin.com/login", timeout=15)
 
             # Try multiple patterns for the CSRF token
             csrf = None
@@ -150,12 +148,14 @@ class LinkedInClient:
                 m = re.search(pattern, login_page.text)
                 if m:
                     csrf = m.group(1)
+                    logger.info("Auto-login: found CSRF via pattern %s → %s", pattern[:30], csrf[:20])
                     break
 
             if not csrf:
+                snippet = login_page.text[:300].replace("\n", " ")
                 logger.warning(
-                    "Auto-login: could not find loginCsrfParam on login page (status=%s).",
-                    login_page.status_code,
+                    "Auto-login: CSRF not found (status=%s, url=%s). Page start: %s",
+                    login_page.status_code, login_page.url, snippet,
                 )
                 return None
 
