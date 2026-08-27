@@ -224,6 +224,9 @@ class LinkedInClient:
     # ── Public ────────────────────────────────────────────────────────────────
 
     def get_profile(self, profile_url: str) -> dict:
+        # Rebuild session (fresh CSRF/JSESSIONID) before each request so
+        # LinkedIn doesn't see stale tokens and invalidate the session.
+        self.session = self._build_session()
         username = self._extract_username(profile_url)
 
         for decoration in DASH_DECORATIONS:
