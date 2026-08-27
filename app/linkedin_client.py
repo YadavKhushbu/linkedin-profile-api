@@ -142,9 +142,10 @@ class LinkedInClient:
             # Try multiple patterns for the CSRF token
             csrf = None
             for pattern in [
-                r'name="loginCsrfParam"\s+value="([^"]+)"',
-                r'"loginCsrfParam"\s*:\s*"([^"]+)"',
-                r'loginCsrfParam["\s:=]+([a-zA-Z0-9_\-]+)',
+                r'data-csrf="([^"]+)"',                          # modern: data attribute
+                r'name="loginCsrfParam"\s+value="([^"]+)"',     # legacy: form field
+                r'"loginCsrfParam"\s*:\s*"([^"]+)"',            # JSON blob
+                r'loginCsrfParam["\s:=]+([a-zA-Z0-9_:\-]+)',   # generic
             ]:
                 m = re.search(pattern, login_page.text)
                 if m:
