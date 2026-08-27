@@ -123,20 +123,40 @@ class LinkedInClient:
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
+                    "Chrome/124.0.0.0 Safari/537.36"
                 ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
             })
 
             # Step 1: GET login page to extract the CSRF token
-            login_page = s.get("https://www.linkedin.com/login", timeout=15)
-            csrf_match = re.search(
-                r'name="loginCsrfParam"\s+value="([^"]+)"', login_page.text
+            login_page = s.get(
+                "https://www.linkedin.com/login",
+                params={"fromSignIn": "true", "trk": "guest_homepage-basic_nav-header-signin"},
+                timeout=15,
             )
-            if not csrf_match:
-                logger.warning("Auto-login: could not find loginCsrfParam on login page.")
+
+            # Try multiple patterns for the CSRF token
+            csrf = None
+            for pattern in [
+                r'name="loginCsrfParam"\s+value="([^"]+)"',
+                r'"loginCsrfParam"\s*:\s*"([^"]+)"',
+                r'loginCsrfParam["\s:=]+([a-zA-Z0-9_\-]+)',
+            ]:
+                m = re.search(pattern, login_page.text)
+                if m:
+                    csrf = m.group(1)
+                    break
+
+            if not csrf:
+                logger.warning(
+                    "Auto-login: could not find loginCsrfParam on login page (status=%s).",
+                    login_page.status_code,
+                )
                 return None
-            csrf = csrf_match.group(1)
 
             # Step 2: POST credentials to LinkedIn's login endpoint
             resp = s.post(
@@ -148,7 +168,11 @@ class LinkedInClient:
                     "isJsEnabled": "false",
                     "trk": "guest_homepage-basic_sign-in-submit",
                 },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": "https://www.linkedin.com/login",
+                    "Origin": "https://www.linkedin.com",
+                },
                 allow_redirects=True,
                 timeout=15,
             )
@@ -174,8 +198,19 @@ class LinkedInClient:
     def _get(self, path: str, params: Optional[dict] = None) -> Optional[requests.Response]:
         url = f"{self.VOYAGER}{path}"
         resp = self.session.get(url, params=params, timeout=20)
+
+        # Session expired mid-use — try auto-login once and retry
         if resp.status_code in (401, 403):
-            raise LinkedInAuthError("Session expired — refresh your LI_AT cookie.")
+            fresh = self._auto_login()
+            if fresh:
+                logger.info("Session expired mid-request; auto-login refreshed cookie.")
+                self.li_at = fresh
+                os.environ["LI_AT"] = fresh
+                self.session = self._build_session()
+                resp = self.session.get(url, params=params, timeout=20)
+            else:
+                raise LinkedInAuthError("Session expired — refresh your LI_AT cookie.")
+
         if resp.status_code == 404:
             raise LinkedInProfileNotFoundError("Profile not found.")
         if resp.status_code in (429, 999):
