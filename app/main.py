@@ -64,6 +64,30 @@ def health():
     return HealthResponse(status="ok", authenticated=_client is not None)
 
 
+@app.post("/refresh-cookie", tags=["meta"])
+def refresh_cookie(
+    li_at: str,
+    secret: str,
+):
+    """
+    Swap the LinkedIn session cookie without restarting the server.
+    Requires the REFRESH_SECRET env var to match the `secret` param.
+    """
+    import os
+    expected = os.environ.get("REFRESH_SECRET", "")
+    if not expected or secret != expected:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Invalid secret.")
+
+    global _client
+    os.environ["LI_AT"] = li_at
+    try:
+        _client = LinkedInClient()
+        return {"success": True, "message": "Cookie updated successfully."}
+    except LinkedInAuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/profile", response_model=ProfileResponse, tags=["profile"])
 def get_profile(
     url: str = Query(

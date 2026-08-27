@@ -9,3 +9,5 @@ services:
     envVars:
       - key: LI_AT
         sync: false
+      - key: REFRESH_SECRET
+        sync: false
